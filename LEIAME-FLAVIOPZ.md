@@ -95,6 +95,10 @@ Para desligar, apague as linhas.
 - **Duas pipelines de folhagem** (task/mesh) ainda falham ao montar, então algumas plantas não aparecem.
 - **Memória:** o jogo usa cerca de 14 GB num Mac de 16 GB, então feche outros apps pesados.
 
+## Apoie o fork
+
+Se o fork te ajudou e você quiser apoiar as atualizações, dá para doar pelo PayPal: [doar pelo PayPal](https://www.paypal.com/donate/?hosted_button_id=CKZWQRPA2XAF2). Também dá para doar pelo botão **Sponsor** no topo da página do repositório.
+
 ## Atualizar a partir do oficial
 
 Este ramo foi feito sobre o nxnative de 5 de novembro de 2026. O oficial também passou a ter um perfil do Ocarina of Time, então juntar os dois dá conflito em `dm/games/0400486024DEC000`. Mantenha o perfil deste ramo, se é o que você testou.
