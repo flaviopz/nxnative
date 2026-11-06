@@ -2596,12 +2596,15 @@ def env_file_pairs(path):   # an environment file's switches (one KEY=VALUE per 
     return out
 
 
-def build_env_file(work, env_file, motion):
-    """The environment file the build bakes in (the iOS app's bundled dm/env.txt, the Mac app's, the Mac run command's switches): the --env-file / DM_ENV_FILE one as it is, or, for a build
-    without motion (MOTION / --no-motion), its switches plus DM_MOTION=0 in <id>_build/build_env.txt"""
-    if motion: return env_file
-    pairs = env_file_pairs(env_file) if env_file else {}
-    pairs['DM_MOTION'] = '0'
+def build_env_file(work, env_file, motion, profile_env=None):
+    """The environment file the build bakes in (the iOS app's bundled dm/env.txt, the Mac app's, the Mac run command's switches): the --env-file / DM_ENV_FILE one as it is, or, when the
+    game's profile has an env.txt (profile_env: switches the game needs on every machine, such as Ocarina of Time's texture-table budget) or for a build without motion
+    (MOTION / --no-motion), the profile's switches, then the given file's (which win), plus DM_MOTION=0, in <id>_build/build_env.txt"""
+    has_profile = profile_env is not None and Path(profile_env).is_file()
+    if motion and not has_profile: return env_file
+    pairs = env_file_pairs(profile_env) if has_profile else {}
+    if env_file: pairs.update(env_file_pairs(env_file))
+    if not motion: pairs['DM_MOTION'] = '0'
     f = work / 'build_env.txt'
     f.write_text(''.join(f'{k}={v}\n' for k, v in pairs.items()))
     return str(f)
@@ -3138,7 +3141,8 @@ def main(args=None):
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
     if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
-    env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
+    env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion, g.dir / 'env.txt')
+    if (g.dir / 'env.txt').is_file(): say(f'environment switches of the game profile built in: {" ".join(env_file_pairs(g.dir / "env.txt"))} (the player\'s own env.txt wins)')
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these

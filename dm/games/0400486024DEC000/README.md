@@ -13,7 +13,7 @@ A Switch 2 game: update v131072, SDK 22.2.8 built for the Switch 2 (`Ounce`), NV
 
 ## Settings it was played with
 
-`DM_OPMODE=0 DM_FPS_TARGET=30 DM_NVN_GMEM_CHUNKS=1 DM_NVN_POOL_BUDGET_MB=32 DM_NVN_POOL_PER_FRAME=4 DM_NVN_UNC_ANY_POOL=1 DM_NVN_KEEP_SHARED_RETIRED=1`, in the app's `env.txt`. `DM_NVN_POOL_PER_FRAME` above about 5 is unsafe: the deferred release keeps a fixed 32 fences.
+`DM_OPMODE=0 DM_FPS_TARGET=30 DM_NVN_GMEM_CHUNKS=1 DM_NVN_POOL_BUDGET_MB=32 DM_NVN_POOL_PER_FRAME=4 DM_NVN_UNC_ANY_POOL=1 DM_NVN_KEEP_SHARED_RETIRED=1`, in the app's `env.txt`. The memory ones and `DM_FPS_TARGET=30` are this profile's `env.txt`, which the build bakes into every app (`build_env_file`): a Mac mini M4 app built without them reached 19 GB of GPU allocations on entering the game ("Insufficient Memory", a black screen). `DM_NVN_POOL_PER_FRAME` above about 5 is unsafe: the deferred release keeps a fixed 32 fences.
 
 ## Known issues
 

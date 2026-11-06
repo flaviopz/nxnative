@@ -269,6 +269,21 @@ class EnvFile(Base):
     def test_missing(self):
         with self.assertRaises(nsp.BuildError): nsp.env_file_pairs(self.tmp / 'none.txt')
 
+    def test_no_profile_env_keeps_the_given_file(self):
+        self.assertEqual(nsp.build_env_file(self.tmp, '', True, self.tmp / 'none.txt'), '')
+        self.assertEqual(nsp.build_env_file(self.tmp, 'given.txt', True, None), 'given.txt')
+
+    def test_profile_env_is_built_in(self):   # Ocarina of Time: the texture-table budget and the other memory switches reach every app, with no env.txt by hand
+        prof = self.tmp / 'profile_env.txt'; prof.write_text('# why\nDM_NVN_POOL_BUDGET_MB=32\nDM_FPS_TARGET=30\n')
+        out = nsp.build_env_file(self.tmp, '', True, prof)
+        self.assertEqual(nsp.env_file_pairs(out), {'DM_NVN_POOL_BUDGET_MB': '32', 'DM_FPS_TARGET': '30'})
+
+    def test_given_file_wins_over_the_profile(self):
+        prof = self.tmp / 'profile_env.txt'; prof.write_text('DM_NVN_POOL_BUDGET_MB=32\nDM_FPS_TARGET=30\n')
+        given = self.tmp / 'given.txt'; given.write_text('DM_FPS_TARGET=0\nDM_X=1\n')
+        out = nsp.build_env_file(self.tmp, str(given), False, prof)
+        self.assertEqual(nsp.env_file_pairs(out), {'DM_NVN_POOL_BUDGET_MB': '32', 'DM_FPS_TARGET': '0', 'DM_X': '1', 'DM_MOTION': '0'})
+
 
 if __name__ == '__main__':
     unittest.main()

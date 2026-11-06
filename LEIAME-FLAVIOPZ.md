@@ -57,24 +57,31 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/ZeldaOoT/ZeldaOoT.nup --platform m
 
 Troque o caminho pelo do seu arquivo. A primeira montagem demora: os shaders são traduzidos do zero, e isso pode levar de 30 a 60 minutos. O app aparece na pasta do jogo e abre pelo Finder.
 
-**4. Ajustes que usamos para jogar.** Crie o arquivo `~/Library/Application Support/nxnative/0400486024DEC000/env.txt` com estas linhas:
+**4. Ajustes de memória: já vêm no app.** Desde 6 de novembro de 2026, a montagem coloca dentro do app as configurações que deixam o jogo estável num Mac de 16 GB. Elas ficam no arquivo `dm/games/0400486024DEC000/env.txt` do fork:
 
 ```
-DM_OPMODE=0
-DM_FPS_TARGET=30
-DM_NVN_GMEM_CHUNKS=1
 DM_NVN_POOL_BUDGET_MB=32
+DM_NVN_GMEM_CHUNKS=1
 DM_NVN_POOL_PER_FRAME=4
 DM_NVN_UNC_ANY_POOL=1
 DM_NVN_KEEP_SHARED_RETIRED=1
+DM_FPS_TARGET=30
+```
+
+- `DM_NVN_POOL_BUDGET_MB=32` é a mais importante. Sem ela, ao entrar no jogo, o Mac tenta criar todas as texturas de uma vez, passa de 19 GB de memória de vídeo e a tela fica preta (às vezes o Mac até reinicia).
+- As outras linhas `DM_NVN_*` são as configurações de memória que deixaram o Campo de Hyrule liso.
+- `DM_FPS_TARGET=30` trava o jogo em 30 fps, com o ritmo certo. É a base do foco em desempenho deste fork, então não troque esse valor.
+
+**Se você montou o app antes de 6 de novembro e teve tela preta:** baixe a versão nova do fork (`git pull`) e rode o passo 3 de novo. Se preferir não montar de novo, crie o arquivo `~/Library/Application Support/nxnative/0400486024DEC000/env.txt` com as linhas acima.
+
+Modo portátil e idioma você escolhe na janela que aparece ao abrir o app. Se quiser deixar fixo, coloque no mesmo `env.txt` da sua pasta:
+
+```
+DM_OPMODE=0
 DM_LANG=pt-BR
 ```
 
-- `DM_OPMODE=0`: modo portátil, com resolução menor e mais fluidez.
-- `DM_FPS_TARGET=30`: trava o jogo em 30 fps, com o ritmo certo. É a base do foco em desempenho deste fork, então não troque esse valor.
-- As linhas `DM_NVN_*` são as configurações de memória que deixaram o Campo de Hyrule liso.
-- `DM_LANG=pt-BR`: jogo em português.
-
+O `env.txt` da sua pasta (`~/Library/Application Support/nxnative/0400486024DEC000/`) é lido primeiro e vale por cima do que vem no app.
 Feche e abra o app de novo depois de mudar o arquivo.
 
 **Em teste, para o Burgo de Hyrule.** Estas duas linhas ainda não foram aprovadas jogando:
@@ -94,6 +101,7 @@ Para desligar, apague as linhas.
 - **Faixa branca na cerca do Rancho Lon Lon:** a causa ainda não foi encontrada.
 - **Duas pipelines de folhagem** (task/mesh) ainda falham ao montar, então algumas plantas não aparecem.
 - **Memória:** o jogo usa cerca de 14 GB num Mac de 16 GB, então feche outros apps pesados.
+- **Tela preta ao entrar no jogo (Mac mini M4 e outros):** acontecia com apps montados sem os ajustes de memória. Corrigido em 6 de novembro de 2026: veja o passo 4.
 
 ## Apoie o fork
 
