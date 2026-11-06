@@ -2,6 +2,8 @@
 
 Este fork é o [nxnative](https://github.com/seedds/nxnative) com os ajustes feitos para jogar **The Legend of Zelda: Ocarina of Time** (Switch 2, `0400486024DEC000`, atualização v131072) num MacBook Air M4 de 16 GB. Os ajustes estão no ramo **`flaviopz-oot`**. O ramo `main` continua igual ao oficial.
 
+**Este fork é focado em desempenho: o jogo roda travado em 30 fps**, no modo portátil, para ficar estável e liso num Mac de 16 GB. Não é uma versão de 60 fps.
+
 Não há nenhum arquivo do jogo aqui. Você precisa do seu próprio dump do jogo (um arquivo `.nup` ou uma pasta com os arquivos dele).
 
 ## O que este fork tem a mais que o oficial
@@ -69,7 +71,7 @@ DM_LANG=pt-BR
 ```
 
 - `DM_OPMODE=0`: modo portátil, com resolução menor e mais fluidez.
-- `DM_FPS_TARGET=30`: trava o jogo em 30 fps, com o ritmo certo.
+- `DM_FPS_TARGET=30`: trava o jogo em 30 fps, com o ritmo certo. É a base do foco em desempenho deste fork, então não troque esse valor.
 - As linhas `DM_NVN_*` são as configurações de memória que deixaram o Campo de Hyrule liso.
 - `DM_LANG=pt-BR`: jogo em português.
 

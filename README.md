@@ -1,6 +1,6 @@
 # nxnative
 
-> **Fork flaviopz:** este fork tem os ajustes para jogar Zelda: Ocarina of Time (Switch 2) no Mac, no ramo `flaviopz-oot`. Guia em português: [LEIAME-FLAVIOPZ.md](LEIAME-FLAVIOPZ.md).
+> **Fork flaviopz:** este fork tem os ajustes para jogar Zelda: Ocarina of Time (Switch 2) no Mac, no ramo `flaviopz-oot`. É focado em desempenho: o jogo roda travado em 30 fps. Guia em português: [LEIAME-FLAVIOPZ.md](LEIAME-FLAVIOPZ.md).
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
 
