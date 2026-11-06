@@ -1,0 +1,56 @@
+# The Legend of Zelda: Ocarina of Time (Switch 2, update v131072). Provisional profile written by hand: facts from the NUP, values not yet proven by a boot
+# Engine of the Tears of the Kingdom family on the Switch 2 toolchain: SDK 22.2.8, spec Ounce, NVN2 API 231.40; modules main (ZBIC) + subsdk0 (NintendoSDK_movie) + sdk
+
+# ---- Identity ----
+# ACI0 of main.npdm in the update and the base
+title_id	0400486024DEC000
+program_id	0400486024DEC000
+
+# ---- App ----
+# the base package's name record: the NUP carries no NACP and no icon
+name	The Legend of Zelda: Ocarina of Time
+# read even for a Mac build; nothing is written under this name
+ipa	TheLegendOfZeldaOcarinaOfTime.ipa
+app_category	public.app-category.adventure-games
+pad_layout	full
+
+# ---- Versions ----
+# the display version is the tag, as Splatoon Raiders': the NUP has no NACP
+build	v131072	v131072	main=e0f3ccfaf50065ae4ea01eb5aeb13b1a	subsdk0=b0110087a7b339ef74588d3bd0b4dd5d	sdk=1643a838814f9c10c696f930ed681e7f
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# main imports from subsdk0, the movie module
+modules	main subsdk0 sdk
+# present in the update's RomFS; Tears of the Kingdom's marker too
+romfs_marker	Pack/ZsDic.pack.zs
+zip_store	.bwav:.webm:.zs:.metallib
+
+# ---- Memory ----
+# nninitStartup (main+0x260bb10) asks for ((total - used) & ~0x1fffff) - 0xaf200000: with this pool and the default 64 MB used, 0x18ce00000 (6.2 GiB). The Switch 1 pool would give it 418 MiB against about 5.9 GiB of HeapDef heaps
+app_pool	0x240000000
+# 2026-11-05: the game keeps 0xaf200000 (2.74 GiB) of the pool for its virtual-address heaps (main+0x260bb10); without the limit UsedMem never counted the alias pages and it mapped 6 GB in Hyrule Field, then a model heap ran out (null MatBlock pool, crash). On Horizon maps past the pool fail and the game evicts
+mem_map_limit	on
+# 256 MB in front + 16 GB alias region (Splatoon Raiders' and Fortune's Weave's) + 256 MB stacks + 8 GB heap region (Mario Kart World's). A Mac-only layout, sized for room: the region check measures the alias use
+mem_reserve	0x620000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+# update main.npdm META +0x14 (the base declares 0x1800000)
+sys_resource	0x3000000
+
+# ---- Graphics ----
+# agl's conditional clear: SetRenderEnableConditional at main+0x23e378, ClearColor at main+0x23e3a0, the sequence Donkey Kong Bananza's note describes; without the key games with it come out black
+render_cond	on
+# the game has dynamic resolution that reads a GPU load, as Donkey Kong Bananza; DM_NVN_GPU_TS=submission undoes this at run time
+gpu_timestamps	segment
+# tex_flush_upload and tex_dirty_upload stay off: Tex/*.bntx.zs and no .txtg, as Bananza. Add both as on if the scene comes out black or the terrain magenta (a host rebuild only)
+
+# ---- Shader split ----
+# inputs of every shader's cache key: do not change these two after the first shader build
+shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout2Shader/=layout
+shader_note	The Legend of Zelda: Ocarina of Time shaders
+
+# heap check: 2026-11-04, heap 6.20 GB
+
+# address regions: 2026-11-05, in its first 15 s in nnMain the game's regions reach alias +1.22 GB, within the profile's 16.00 GB alias region (what it takes later in play is not measured here) (rewrite 53345fcc19d9)

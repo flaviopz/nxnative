@@ -160,8 +160,22 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         internal int GetDepthRegister()
         {
-            // The depth register is always two registers after the last color output.
-            return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
+            // nxnative: a pixel shader's outputs are read from registers by render target: four for each target with
+            // any component enabled (component c of the n-th such target in R(4n + c), as EmitterContext.PrepareForReturn
+            // reads the colours), none for a disabled target. The sample mask register follows, then the depth, whether
+            // or not the sample mask is written. Upstream counted enabled components, which agrees only when every
+            // enabled target has all four: OmapTargets 0x10f (RT0 RGBA, RT2 R) read depth from R6 instead of R9.
+            int targets = 0;
+
+            for (int rtIndex = 0; rtIndex < 8; rtIndex++)
+            {
+                if ((Definitions.OmapTargets & (0xf << (rtIndex * 4))) != 0)
+                {
+                    targets++;
+                }
+            }
+
+            return targets * 4 + 1;
         }
 
         public void SetLayerOutputAttribute(int attr)
