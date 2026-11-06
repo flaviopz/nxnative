@@ -165,6 +165,23 @@ static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
+// Worn sticks: DM_LSTICK_CAL / DM_RSTICK_CAL = 16 comma-separated radii, the stick's reach in 16 directions from right, counter-clockwise (22.5° apart);
+// a deflection is divided by the reach in its direction (interpolated), so a stick that only gets to 0.8 up still reads full up. Unset: values as they come
+typedef struct { int on; float r[16]; } stick_cal;
+static stick_cal g_lcal, g_rcal;
+static void stick_cal_load(stick_cal *c, const char *name) {
+    const char *e = getenv(name); if (!e) return;
+    int n = 0; char *end;
+    for (const char *s = e; n < 16 && *s; s = *end ? end + 1 : end) { c->r[n] = strtof(s, &end); if (end == s || c->r[n] < 0.3f) break; n++; }
+    c->on = n == 16; LOG("front end: %s %s", name, c->on ? "on (16 directions)" : "ignored (needs 16 radii, each at least 0.3)");
+}
+static void stick_apply(const stick_cal *c, float *x, float *y) {
+    float r = hypotf(*x, *y); if (!c->on || r < 1e-4f) return;
+    float a = atan2f(*y, *x); if (a < 0) a += 2 * (float)M_PI;
+    float f = a / (2 * (float)M_PI) * 16; int i = (int)f % 16; float t = f - floorf(f);
+    float reach = c->r[i] * (1 - t) + c->r[(i + 1) % 16] * t, k = fminf(r / reach, 1.f) / r;
+    *x *= k; *y *= k;
+}
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     const int32_t dead = DM_STICK_MAX * 15 / 100;
@@ -184,7 +201,9 @@ static void pad_read(GCExtendedGamepad *g) {
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
-    pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    float lx = g.leftThumbstick.xAxis.value, ly = g.leftThumbstick.yAxis.value, rx = g.rightThumbstick.xAxis.value, ry = g.rightThumbstick.yAxis.value;
+    stick_apply(&g_lcal, &lx, &ly); stick_apply(&g_rcal, &rx, &ry);
+    pad_set(p, m, pad_axis(lx), pad_axis(ly), pad_axis(rx), pad_axis(ry));
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
@@ -410,6 +429,7 @@ static void hq_close(void) {
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
+    stick_cal_load(&g_lcal, "DM_LSTICK_CAL"); stick_cal_load(&g_rcal, "DM_RSTICK_CAL");
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
@@ -434,7 +454,10 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
-    double a = g_picture_aspect; if (w / h > a) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT)
+    const char *fit = getenv("DM_PRESENT_FIT"); int zoom = fit && !strcmp(fit, "zoom"), stretch = fit && !strcmp(fit, "stretch");
+    double a = g_picture_aspect;
+    if (stretch) {}   // the picture is the whole view
+    else if ((w / h > a) != zoom) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT); zoom: the one that covers it
     double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
@@ -1334,6 +1357,11 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        // The game's picture is sRGB; tagged so, the window server converts it to a wide-gamut screen (the MacBooks' Display P3). Untagged, the values went to the panel
+        // as they are and the colours came out oversaturated. DM_COLORSPACE=native leaves the layer untagged, as before
+        const char *cs_env = getenv("DM_COLORSPACE");
+        if (!cs_env || strcmp(cs_env, "native")) { CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB); g_layer.colorspace = cs; CGColorSpaceRelease(cs); }
+        else LOG("front end: the window is not colour-managed (DM_COLORSPACE=native)");
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

@@ -46,6 +46,34 @@ class HalfImmediate(Alu):
         self.assertRegex(msl, r'\b2\.0\b')
 
 
+class F2ip(Alu):
+    """F2IP.U8.F32.NTZ (0x243) Rd, a, b, RZ in the encodings of Ocarina of Time's video recorder (word 2 0x04ff) and foliage mesh shaders (0xc4ff, a = RZ): b in byte 0, a in byte 1, saturated, NaN 0"""
+    NEAREST = (0x000fe200000004ff, 0x0000001309067243)   # F2IP R6, R9, R19
+    TRUNCATE = (0x000fe2000000c4ff, 0x00000013ff067243)  # F2IP R6, RZ, R19
+
+    def refused(self, code):
+        with self.assertRaises(AssertionError) as e: self.kept(code, srcs=(19,))
+        self.assertIn('F2IP form', str(e.exception))
+
+    def test_two_values_round_and_pack(self):
+        msl = self.kept(self.NEAREST, srcs=(19,))
+        self.assertEqual(msl.count('rint('), 2)
+        self.assertIn('<< 8', msl)
+        self.assertIn('255.0', msl)
+        self.assertRegex(msl, r'\b2147483647\b|\b2147483647u\b')   # NaN by its bits
+
+    def test_one_value_truncates(self):
+        msl = self.kept(self.TRUNCATE, srcs=(19,))
+        self.assertIn('trunc(', msl)
+        self.assertNotIn('<< 8', msl)
+
+    def test_other_forms_stay_refused(self):
+        self.refused((self.NEAREST[0] & ~0xff | 5, self.NEAREST[1]))   # a C register
+        self.refused((self.NEAREST[0] | 1 << 72 - 64, self.NEAREST[1]))   # another type
+        self.refused((self.NEAREST[0] ^ 1 << 78 - 64, self.NEAREST[1]))   # floor
+        self.refused((self.NEAREST[0], self.NEAREST[1] | 1 << 63))   # a modifier
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out

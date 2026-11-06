@@ -35,6 +35,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x107, InstName.F2f, AFrnd);
             alu(0x104, InstName.F2f, AF2f);
             alu(0x03e, InstName.F2f, AF2fp);
+            alu(0x043, InstName.F2i, AF2ip);
             alu(0x030, InstName.Hadd2, AHadd2);
             alu(0x032, InstName.Hmul2, AHmul2);
             alu(0x031, InstName.Hfma2, AHfma2);
@@ -285,6 +286,43 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Operand r = Register(x.Rd, RegisterType.Gpr);
                 context.Copy(r, signed ? context.IClampS32(r, Const(-128), Const(127)) : context.IClampU32(r, Const(0), Const(255)));
             }
+        }
+
+        // F2IP.U8.F32.NTZ (0x243) Rd, a, b, RZ: two floats to unsigned bytes, as PTX's cvt.pack.sat.u8: b in byte 0, a in byte 1, the upper half zero (it would be the low half of C; only RZ occurs, so only that
+        // form is taken). Each value is saturated to 0..255 and NaN gives 0. NVIDIA's forum shows the SASS for cvt.pack; which source lands where comes from Ocarina of Time's two video recorder shaders, which write
+        // Y0..Y3 and U, V to NV12 planes: F2IP R21, Y1, Y0, then PRMT 0x5410 joins two pairs into a word. The foliage compute shaders pack RGBA colours the same way. Rounding (78..80, as F2I's): 0 nearest in those, 3 truncate in the foliage mesh shaders, whose F2IP Rd, RZ, b
+        // is one byte they shift to 16 and 24. Bit 74 is set in all 42 and its meaning is not known, so any other value of 72..78 stays refused
+        public static void AF2ip(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int round = x.Bits(78, 80);
+
+            if (x.Form != 1 || x.Rc != RegisterConsts.RegisterZeroIndex || x.Bits(72, 78) != 4 || (round != 0 && round != 3) || x.Bits(80, 96) != 0 || x.Field(40, 64) != 0)
+            {
+                throw AFail(context, $"F2IP form {x.Form}, C R{x.Rc}, bits 72..80 {x.Bits(72, 80):x2}");
+            }
+
+            Operand a = AF2ipByte(context, x.Ra, round);
+            Operand b = AF2ipByte(context, x.Rb, round);
+
+            ASet(context, x, context.BitwiseOr(context.ShiftLeft(a, Const(8)), b));
+        }
+
+        private static Operand AF2ipByte(EmitterContext context, int reg, int round)
+        {
+            if (reg >= RegisterConsts.RegisterZeroIndex)
+            {
+                return Const(0);
+            }
+
+            Operand bits = Register(reg, RegisterType.Gpr);
+            Operand v = round == 0 ? context.FPRound(bits) : context.FPTruncate(bits);
+
+            Operand top = context.ConditionalSelect(context.FPCompareLess(v, ConstF(255f)), v, ConstF(255f));
+            Operand converted = context.FP32ConvertToU32(context.ConditionalSelect(context.FPCompareLess(ConstF(0f), v), top, ConstF(0f)));
+
+            // NaN by its bits: the shader libraries compile with Metal's fast math, which takes no float to be NaN, so a float comparison does not settle it
+            return context.ConditionalSelect(context.ICompareGreaterUnsigned(context.BitwiseAnd(bits, Const(0x7fffffff)), Const(0x7f800000)), Const(0), converted);
         }
 
         // I2F: source signed (74) and size (84..86), destination size (75..77), byte / half select of a narrow source (60..62)

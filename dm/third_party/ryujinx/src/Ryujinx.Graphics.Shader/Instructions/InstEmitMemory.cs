@@ -2,6 +2,7 @@ using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
 using System.Numerics;
+using static Ryujinx.Graphics.Shader.Instructions.InstEmitAluHelper;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitHelper;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
@@ -207,9 +208,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AtomSize type,
             Operand e0,
             Operand e1,
-            Operand value)
+            Operand value,
+            bool strict = false)
         {
             Operand res = Const(0);
+
+            // strict: Ampere's callers. What this cannot express fails the translation there: a dropped RED or ATOM builds, then loses its writes without a sign
+            void Invalid(string what)
+            {
+                if (strict)
+                {
+                    throw AFail(context, what);
+                }
+
+                context.TranslatorContext.GpuAccessor.Log($"{what}.");
+            }
 
             switch (op)
             {
@@ -218,9 +231,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
                     }
+                    else if (type == AtomSize.F32FtzRn)
+                    {
+                        res = EmitAtomicFloatAddFtz(context, storageKind, e0, e1, value, F32AddFtz);
+                    }
+                    else if (type == AtomSize.F16x2FtzRn)
+                    {
+                        res = EmitAtomicFloatAddFtz(context, storageKind, e0, e1, value, F16x2AddFtz);
+                    }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
@@ -235,7 +256,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
@@ -250,7 +271,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
@@ -261,7 +282,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
@@ -272,7 +293,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
@@ -283,7 +304,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
@@ -294,16 +315,65 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
+                        Invalid($"Invalid reduction type: {type}");
                     }
 
                     break;
                 default:
-                    context.TranslatorContext.GpuAccessor.Log($"Invalid atomic operation: {op}.");
+                    Invalid($"Invalid atomic operation: {op}");
                     break;
             }
 
             return res;
+        }
+
+        // RED.ADD or ATOM.ADD on an F32, or on two F16 halves, with FTZ and round to nearest (Ocarina of Time's foliage and terrain pixel shaders, Donkey Kong Bananza's 2 compute shaders): no float atomics in Metal here, so a
+        // compare-and-swap loop on the word. A denormal operand counts as zero and a denormal sum becomes zero, as on NVIDIA; Apple's GPUs keep denormals. The loop goes through the same storage and memory pool table paths as any CAS (GlobalToStorage.cs).
+        // A helper invocation skips it: its atomics change nothing and what they return is undefined, so the loop might never end. On the console a helper thread writes nothing either. The result is the word's old value:
+        // oldValue has one definition, as PropagateCopy assumes of a local, and a local assigned twice would read as its first copy
+        private static Operand EmitAtomicFloatAddFtz(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value, System.Func<EmitterContext, Operand, Operand, Operand> add)
+        {
+            Operand lblEnd = Label();
+
+            if (context.TranslatorContext.Definitions.Stage == ShaderStage.Fragment)
+            {
+                context.BranchIfTrue(lblEnd, context.Load(StorageKind.Input, IoVariable.HelperInvocation));
+            }
+
+            Operand lblLoopHead = Label();
+
+            context.MarkLabel(lblLoopHead);
+
+            Operand oldValue = context.Load(storageKind, e0, e1);
+            Operand casResult = context.AtomicCompareAndSwap(storageKind, e0, e1, oldValue, add(context, oldValue, value));
+
+            context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
+            context.MarkLabel(lblEnd);
+
+            return oldValue;
+        }
+
+        private static Operand F32AddFtz(EmitterContext context, Operand a, Operand b)
+        {
+            return FlushDenormal(context, context.FPAdd(FlushDenormal(context, a), FlushDenormal(context, b)));
+        }
+
+        // Each half on its own, added as F32: the sum of two F16s rounds to F16 as it is packed
+        private static Operand F16x2AddFtz(EmitterContext context, Operand a, Operand b)
+        {
+            return context.PackHalf2x16(
+                F16AddFtz(context, context.UnpackHalf2x16Low(a), context.UnpackHalf2x16Low(b)),
+                F16AddFtz(context, context.UnpackHalf2x16High(a), context.UnpackHalf2x16High(b)));
+        }
+
+        private static Operand F16AddFtz(EmitterContext context, Operand a, Operand b)
+        {
+            return FlushDenormalF16(context, context.FPAdd(FlushDenormalF16(context, a), FlushDenormalF16(context, b)));
+        }
+
+        private static Operand FlushDenormalF16(EmitterContext context, Operand v)
+        {
+            return context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(v), ConstF(6.1035156e-05f)), ConstF(0), v);   // the smallest normal F16, 2^-14
         }
 
         private static void EmitLoad(

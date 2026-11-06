@@ -550,7 +550,7 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // pixel stage alone, a program of its own as a geometry draw's raster stage is, so it takes the render pass and the pixel stage's state like any draw; mtk_pso gives its pipeline and
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; both read the
 // draw's first workgroup at buffer 29. A pipeline is built in the background and its draws are left out until it is ready, as for a geometry mesh pipeline
-static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; } g_mtk;
+static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind; } g_mtk;   // ind: the shadow of an indirect draw's count on the GPU (mgp_ensure), 0 to use count
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
@@ -580,35 +580,155 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     });
     return nil;
 }
+static void mgp_recheck(uint64_t shadow);
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4);
     if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
               if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, b.gpuAddress + o, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:b.gpuAddress + o atIndex:DMSH_MESH_FIRST_SLOT]; }
-    g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
+    if (g_enc == en) { g_args_dirty[4] = 1; encode_args(en, ms, 4, 1); }
+    // As in draw_: binding a texture view can upgrade its texture through blit(), which ends the pass, and en must not draw then. That blit lands deferred inline updates too, so the count is checked again
+    if (g_enc != en) {
+        static int again; if (again) { RED_ONCE(157, "binding a task / mesh draw's arguments ended its render pass twice; draw skipped"); return; }
+        PD("M %llu binding the task / mesh stages ended the render pass (texture upgrade); encoded again", g_stat_pass);
+        if (g_mtk.ind) mgp_recheck(g_mtk.ind);
+        p_draw triangle = {.prim = 4, .count = 3, .instances = 1};
+        again = 1; draw_(&triangle, NULL); again = 0; return;
+    }
     enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, b.gpuAddress + o);
-    [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
+    if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
+    else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
 }
+// Indirect draws read their count on the GPU. The game's foliage compute writes the record {count, first} in the same submission as the draw, so a read at encode time mostly saw 0 (about 93% of
+// reads, while a sampler on the same addresses saw counts up to 503) and most foliage was dropped each frame. A record cannot be Metal's {x, y, z} itself (the word after first is 0), so each
+// distinct record has a shadow {count, 1, 1} here, y and z written once; a copy moves the 4 count bytes. The copies must come after the writer and before the pass that draws, and Metal cannot copy
+// inside a pass, so:
+// - before a pass begins (rp_begin_ex_), when writes happened since the last copies (g_mgp_wr; a new submission counts, as the CPU may have written) and an indirect mesh draw comes before the next
+//   dispatch (mgp_ahead), every known record is copied. No pass ends for it. Most of about 175 passes a frame draw none, so the look ahead keeps this to a few runs a frame.
+// - a draw whose record has not been copied since the last writes (first seen, or met inside an open pass) ends the pass, copies every known record and goes on: draw_ opens the next pass.
+// Order: the copies share the open copy encoder with the dispatches before them, behind a barrier from dispatch and blit to dispatch and blit (blit, blit_barrier), or open a new one whose entry
+// barrier waits for all earlier work (blit_open). That encoder ends in rp_begin_ex_ with a barrier from all stages to all later work (m4_end), which also clears g_last_end_relaxed, so the
+// pass that follows starts with the full consumer barrier (enc_r_begin_pass): the draw's indirect read comes after the copy. Writes by draws inside a pass are not seen, as for g_wr_epoch.
+// Records leave the table: one not drawn for MGP_IDLE submissions at the sweep every MGP_SWEEP, and when the table is full, any not drawn in this submission. Copies then stop reading it and writes
+// near it stop counting; drawn again, it is new. A kept record keeps its shadow slot, so a sweep splits no pass, and a freed slot needs no wait: all hold y = z = 1 and the GPU sees copies in order.
+// DM_NVN_MTK_CPUREAD=1 reads the count at encode time as before. A nonzero first keeps that draw on that path, since the shaders take first from the CPU
+enum { MGP_MAX = 512, MGP_SLOTS = 2048, MGP_STRIDE = 12, MGP_IDLE = 300, MGP_SWEEP = 60 };
+typedef struct { uint64_t ind, drawn; uint32_t run; } mgp_ent;   // the record's guest address (resolved at each copy: pools come and go), 0 for a free entry; the submission that last drew it; the copy run that last filled its shadow
+static mgp_ent g_mgp[MGP_MAX]; static uint16_t g_mgp_slot[MGP_SLOTS], g_mgp_free[MGP_MAX]; static int g_mgp_nfree;   // open addressing by guest address: index + 1; entries below g_mgp_n that are free
+static id<MTLBuffer> g_mgp_buf; static uint64_t g_mgp_gpu, g_mgp_draws, g_mgp_breaks, g_mgp_runs, g_mgp_copied, g_mgp_scan_none, g_mgp_dropped, g_mgp_sweep_sub, g_mgp_full_sub = ~0ull;
+static uint64_t g_mgp_done_wr, g_mgp_done_sub, g_mgp_none_wr, g_mgp_none_sub; static uint32_t g_mgp_run;
+static int mtk_cpuread(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MTK_CPUREAD"); v = e && !strcmp(e, "1"); if (v) MLOG("DM_NVN_MTK_CPUREAD: indirect mesh draws read their count on the CPU at encode time"); } return v; }
+static inline uint32_t mgp_hash(uint64_t ind) { return (uint32_t)((ind >> 2) * 0x9E3779B97F4A7C15ull >> 40) & (MGP_SLOTS - 1); }
+static inline void mgp_page_set(uint64_t ind) { uint32_t k = mgp_page_bit(ind >> 12); g_mgp_pages[k >> 6] |= 1ull << (k & 63); }
+static void mgp_sweep(uint64_t idle) {   // drops the records not drawn for idle submissions; the hash table and the page filter are made again from the rest
+    memset(g_mgp_slot, 0, sizeof g_mgp_slot); memset(g_mgp_pages, 0, sizeof g_mgp_pages);
+    for (int i = 0; i < g_mgp_n; i++) { mgp_ent *e = &g_mgp[i]; if (!e->ind) continue;
+        if (g_sub_serial - e->drawn >= idle) { e->ind = 0; g_mgp_free[g_mgp_nfree++] = (uint16_t)i; g_mgp_dropped++; continue; }
+        uint32_t h = mgp_hash(e->ind); while (g_mgp_slot[h]) h = (h + 1) & (MGP_SLOTS - 1);
+        g_mgp_slot[h] = (uint16_t)(i + 1); mgp_page_set(e->ind); }
+}
+static int mgp_get(uint64_t ind) {   // the record's index, added if new; -1 when the table is full of records drawn in this submission
+    if (g_sub_serial - g_mgp_sweep_sub >= MGP_SWEEP) { g_mgp_sweep_sub = g_sub_serial; mgp_sweep(MGP_IDLE); }
+    uint32_t h = mgp_hash(ind);
+    for (;; h = (h + 1) & (MGP_SLOTS - 1)) {
+        int v = g_mgp_slot[h];
+        if (!v) break;
+        if (g_mgp[v - 1].ind == ind) { g_mgp[v - 1].drawn = g_sub_serial; return v - 1; }
+    }
+    if (g_mgp_n == MGP_MAX && !g_mgp_nfree) {
+        if (g_mgp_full_sub != g_sub_serial) { g_mgp_full_sub = g_sub_serial; mgp_sweep(1); }
+        if (!g_mgp_nfree) { RED_ONCE(153, "indirect mesh draws: more than %d distinct records in one submission, the rest read their count on the CPU", MGP_MAX); return -1; }
+        h = mgp_hash(ind); while (g_mgp_slot[h]) h = (h + 1) & (MGP_SLOTS - 1);
+    }
+    if (!g_mgp_buf) {
+        g_mgp_buf = [g_dev newBufferWithLength:MGP_MAX * MGP_STRIDE options:MTLResourceStorageModeShared];
+        if (!g_mgp_buf) { RED_ONCE(154, "indirect mesh draws: cannot create the shadow buffer, the count is read on the CPU"); return -1; }
+        g_mgp_buf.label = @"indirect mesh draw shadows"; g_mgp_gpu = g_mgp_buf.gpuAddress; res_add(g_mgp_buf); res_commit();
+    }
+    int i = g_mgp_nfree ? g_mgp_free[--g_mgp_nfree] : g_mgp_n++; g_mgp[i] = (mgp_ent){ind, g_sub_serial, 0}; g_mgp_slot[h] = (uint16_t)(i + 1);
+    uint32_t *sh = (uint32_t *)((uint8_t *)g_mgp_buf.contents + (size_t)i * MGP_STRIDE); sh[1] = sh[2] = 1;   // the GPU reads this slot only after a later copy
+    mgp_page_set(ind); return i;
+}
+static void mgp_copy_run(void) {
+    g_blit_alias = 1;   // as blit_buf: an encoder blit opens starts with alias visibility
+    id<MTL4ComputeCommandEncoder> e = blit();   // ends an open pass and lands the deferred inline updates first; a later copy or dispatch in the encoder gets a barrier
+    g_blit_alias = 1;
+    uint32_t run = ++g_mgp_run;
+    for (int i = 0; i < g_mgp_n; i++) { void *b; uint64_t o; if (!g_mgp[i].ind) continue; g_mgp[i].run = run;
+        if (!mtl_addr(g_mgp[i].ind, 4, &b, &o)) continue;   // its pool is gone; a draw from this address would stop at its own lookup
+        enc_b_copy_buffer(e, (__bridge id<MTLBuffer>)b, o, g_mgp_buf, (NSUInteger)i * MGP_STRIDE, 4); g_mgp_copied++; }
+    g_mgp_done_wr = g_mgp_wr; g_mgp_done_sub = g_sub_serial; g_mgp_runs++;   // after blit: landed updates may have counted as writes
+}
+// Whether an indirect mesh draw may come before the next dispatch or texture → buffer copy, the writes every such op counts. Buffer copies are passed over, since they count only near a record.
+// A dispatch already run ahead of this pass is passed over too: it came before these copies. A wrong 0 costs a pass break at that draw, never a stale count (mgp_ensure)
+static int csh_pending(const uint8_t *p);   // nvn_mtl.m: a dispatch cs_hoist_try has already run
+static int mgp_ahead(void) {
+    const uint8_t *from = g_exec_next ? g_exec_next : g_exec_cur;
+    if (!from || g_ret_n > 8) return 1;
+    fz_cursor cur = {.p = from, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
+    const uint8_t *q; op_hdr h; const void *a;
+    for (int guard = 0; guard < 20000; guard++) {
+        if (!fz_next(&cur, &q, &h, &a)) return cur.bad;   // the submission's end: the next one counts as a write
+        if (h.op == OP_DISPATCH && csh_pending(q)) continue;
+        if (h.op == OP_DISPATCH || h.op == OP_COPY_T2B) return 0;
+        if (h.op == OP_DRAW) { p_draw t; const p_draw *d = draw_rec(a, h.size, &t); if (d->prim == DM_PRIM_MESH_TASKS && d->ind) return 1; }
+    }
+    return 1;
+}
+static void mgp_pass_begin(void) {   // rp_begin_ex_: no pass is open
+    if (!g_cb || (g_mgp_done_wr == g_mgp_wr && g_mgp_done_sub == g_sub_serial)) return;
+    if (g_mgp_none_wr == g_mgp_wr && g_mgp_none_sub == g_sub_serial) return;   // already scanned as far as the next write
+    if (!mgp_ahead()) { g_mgp_none_wr = g_mgp_wr; g_mgp_none_sub = g_sub_serial; g_mgp_scan_none++; return; }
+    mgp_copy_run();
+}
+static void mgp_ensure(int i) {   // before the draw: its shadow holds what its record holds at this point of the submission
+    if (g_mgp[i].run == g_mgp_run && g_mgp_done_wr == g_mgp_wr && g_mgp_done_sub == g_sub_serial && !(g_nubd && ubd_hits(g_mgp[i].ind, g_mgp[i].ind + 4))) return;
+    if (g_enc) { g_mgp_breaks++; PD("M %llu indirect mesh draw: render pass split here to copy its count", g_stat_pass); rp_end(); }
+    mgp_copy_run();
+}
+static void mgp_recheck(uint64_t shadow) { mgp_ensure((int)((shadow - g_mgp_gpu) / MGP_STRIDE)); }
+// DM_NVN_MTK_STATS=1: direct and indirect draws, indirect records read as zero, draws dropped waiting for a pipeline, records whose count changed since the last read at that address, and for the GPU path its draws, the passes it ended, its copy runs and records copied
+typedef struct { const uint32_t *rec; uint32_t last; } mtk_seen;
+static uint64_t g_mtks_dir, g_mtks_ind, g_mtks_zero, g_mtks_changed, g_mtks_wait0, g_mtks_next;
+static mtk_seen g_mtks_seen[4096];
+static int mtk_stats_on(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_MTK_STATS") != NULL; return v; }
+static void mtk_stats_report(void) { uint64_t n = mtl_present_count(); if (n < g_mtks_next) return; g_mtks_next = n + 300;
+    MLOG("mesh stats at frame %llu: direct %llu, indirect %llu, indirect read as zero %llu, indirect count changed %llu, dropped waiting for a pipeline %llu; count on the GPU: draws %llu, passes ended %llu, copy runs %llu, records copied %llu, passes with no draw ahead %llu, %d records, %llu dropped", (unsigned long long)n, (unsigned long long)g_mtks_dir, (unsigned long long)g_mtks_ind, (unsigned long long)g_mtks_zero, (unsigned long long)g_mtks_changed, (unsigned long long)g_mtk_wait, (unsigned long long)g_mgp_draws, (unsigned long long)g_mgp_breaks, (unsigned long long)g_mgp_runs, (unsigned long long)g_mgp_copied, (unsigned long long)g_mgp_scan_none, g_mgp_n - g_mgp_nfree, (unsigned long long)g_mgp_dropped); }
 static void mesh_tasks_draw(const p_draw *dw) {
-    if (!S.prog || dw->count <= 0) return;
+    p_draw from_record; uint64_t ind = dw->ind; int on_gpu = 0;
+    if (mtk_stats_on()) { mtk_stats_report(); if (!dw->ind) g_mtks_dir++; }
+    if (dw->ind) {
+        void *ab; uint64_t ao; const uint8_t *base;
+        if (!mtl_addr(dw->ind, 8, &ab, &ao) || !(base = ((__bridge id<MTLBuffer>)ab).contents)) { RED_ONCE(156, "indirect DrawMeshTasks skipped: argument address %#llx is in no CPU-visible pool", (unsigned long long)dw->ind); return; }
+        const uint32_t *rec = (const uint32_t *)(base + ao);
+        if (mtk_stats_on()) { g_mtks_ind++; if (!rec[0]) g_mtks_zero++; mtk_seen *e = &g_mtks_seen[((uintptr_t)rec >> 3) & 4095]; if (e->rec == rec && e->last != rec[0]) g_mtks_changed++; e->rec = rec; e->last = rec[0]; }
+        on_gpu = !mtk_cpuread();
+        if (on_gpu && rec[1]) { on_gpu = 0; RED_ONCE(155, "indirect DrawMeshTasks with first %u at %#llx: the count of such draws is read on the CPU, since the shaders take first from the CPU", rec[1], (unsigned long long)dw->ind); }
+        from_record = *dw; from_record.count = (int)rec[0]; from_record.first = (int)rec[1]; from_record.ind = 0; dw = &from_record;
+    }
+    if (!S.prog || (!on_gpu && dw->count <= 0)) return;
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
     NvShader *ts = pr ? pr->sh[3] : nil, *ms = pr ? pr->sh[4] : nil;
     if (ts && ts->mesh_kind != 1) ts = nil;
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ts ? !ts->fn : !ms->mesh_notask)) {
         RED_ONCE(150, "DrawMeshTasks without its task and mesh shaders (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
+    int mi = on_gpu ? mgp_get(ind) : -1;
+    if (on_gpu && mi < 0) { on_gpu = 0; if (dw->count <= 0) return; }   // no shadow: the count on the CPU, as for DM_NVN_MTK_CPUREAD
     image_prepare(pr, 1u << 3 | 1u << 4);
     if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
+    if (on_gpu) mgp_ensure(mi);   // last before the draw: what ended a pass above may have landed writes
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
-    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;
+    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count; g_mtk.ind = on_gpu ? g_mgp_gpu + (uint64_t)mi * MGP_STRIDE : 0;
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};
     draw_(&triangle, NULL);
     g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
     if (g_mtk.miss) { g_mtk_wait++; return; }
     swrite_note(pr); g_wr_epoch++;
-    if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first);
+    if (on_gpu && !g_mgp_draws++) MLOG("task / mesh: first indirect draw with its count read on the GPU, task %s mesh %s fragment %s, record %#llx", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", (unsigned long long)ind);
+    if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %s%u workgroups from %u", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", on_gpu ? "count on the GPU, at encode " : "", g_mtk.count, g_mtk.first);
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
 static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {

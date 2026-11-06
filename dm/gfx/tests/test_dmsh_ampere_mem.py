@@ -198,6 +198,9 @@ class StageMemory(Translated):
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
 
+    def test_own_output_word_is_read_back(self):   # ISBERD R19, [RZ + 0x20], mode 0xb8 (Ocarina of Time's task shader reads its count back): 0x120 + 0x20
+        self.assertRegex(self.msl((self.INPUT[0] & ~0xff00 | 0xb800, self.INPUT[1]), self.KEEP_R19), r'as_type<float>\(_\d+\[80\]\)')
+
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
 
@@ -212,6 +215,63 @@ class StageMemory(Translated):
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))
         self.assertIn('outside a task or mesh shader', str(e.exception))
+
+
+class GlobalAtomics(Translated):
+    """ATOMG.E.CAS (0x3a9) and RED.ADD on an F32 with FTZ, in Ocarina of Time's encodings, on addresses from a uniform register no storage buffer table holds, so through the memory pool table.
+    The same forms in the game's own shaders go to storage buffers"""
+    S2R_R0, S2R_R8, S2R_R9 = (0x000e260000002100, 0x0000000000007919), (0x000e260000002100, 0x0000000000087919), (0x000e260000002100, 0x0000000000097919)
+    CAS = (0x000ea400001ee109, 0x00000008000073a9)   # ATOMG.E.CAS R0, [R0.64], R8, R9
+    UR4 = (0x000fe20000000a00, 0x00c0040000047ab9)   # UR4 = c3[0x10]
+    RED = (0x0201e8000c10e704, 0x00002000ff00798e)   # RED.ADD.F32.FTZ.RN [UR4.64 + 0x20], R0
+    KEEP = (0x0fcea200001ee000, 0x00000c00030c7593)  # SUATOM with R0, waiting on the write barrier of what wrote R0: so the result is used
+    DATA = r'atomic_fetch_add_explicit[^;]*uint\(%s\), memory_order'
+
+    def atom(self, size):   # ATOMG.ADD R0, [R0.64], R8 with its result consumed
+        return self.translate(b''.join(inst(*c) for c in (self.S2R_R0, self.S2R_R8, (0x000ea400001ee1ff | size << 73 - 64, 0x00000008000073a8), self.KEEP, EXIT)))
+
+    def test_cas_returns_the_old_value(self):
+        msl = self.translate(b''.join(inst(*c) for c in (self.S2R_R0, self.S2R_R8, self.S2R_R9, self.CAS, self.KEEP, EXIT)))
+        self.assertIn('atomic_compare_exchange', msl)
+        self.assertNotRegex(msl, r'\? 1 : 0;')   # not ATOMS.CAS's 1 or 0
+        result = re.search(r'int (_\d+) = _\d+;\s+int2 _\d+ = int2\(0\);', msl)
+        self.assertIsNotNone(result)
+        self.assertRegex(msl, self.DATA % result[1])
+
+    def test_cas_takes_expected_from_rb_and_new_from_rc(self):   # R8 from the S2R, Rc = RZ
+        cas = (self.CAS[0] & ~0xff | 0xff | 0x3f << 52, self.CAS[1])
+        msl = self.translate(b''.join(inst(*c) for c in (self.S2R_R8, cas, self.KEEP, EXIT)))
+        self.assertRegex(msl, r'int (_\d+) = as_type<int>\(_\d+\);\s+int (_\d+) = 0;\s+int _\d+ = _\d+\(_\d+, _\d+, \1, \2,')
+
+    def test_float_atomics_return_the_old_value(self):   # F32 and F16x2; a local assigned twice once made this 0
+        for size in 3, 4:
+            with self.subTest(size=size):
+                msl = self.atom(size)
+                old = re.search(r'(_\d+) = _\d+\(_\d+, _\d+, \(\*spvDescriptorSet0', msl)
+                self.assertIsNotNone(old)
+                self.assertRegex(msl, self.DATA % old[1])
+
+    def test_cas_other_forms_are_refused(self):
+        with self.assertRaises(AssertionError) as e: self.translate(inst(self.CAS[0] | 1 << 73 - 64, self.CAS[1]) + inst(*EXIT))
+        self.assertIn('ATOMG.CAS size', str(e.exception))
+
+    def test_f32_reduction_is_a_flushing_cas_loop(self):
+        msl = self.translate(b''.join(inst(*c) for c in (self.S2R_R0, self.UR4, self.RED, EXIT)))
+        self.assertIn('atomic_compare_exchange', msl)
+        self.assertRegex(msl, r'1\.17549\d+e-38')   # the denormal test
+        self.assertIn('do', msl)
+
+    def red(self, size): return b''.join(inst(*c) for c in (self.S2R_R0, self.UR4, (self.RED[0] & ~(7 << 73 - 64) | size << 73 - 64, self.RED[1]), EXIT))
+
+    def test_f16x2_reduction_is_a_flushing_cas_loop_on_each_half(self):   # Donkey Kong Bananza's 2 compute shaders
+        msl = self.translate(self.red(4))
+        self.assertIn('atomic_compare_exchange', msl)
+        self.assertEqual(msl.count('6.103515625e-05'), 6)   # two operands and a sum, in each half
+        self.assertRegex(msl, r'as_type<uint>\(half2\(float2\(_\d+, _\d+\)\)\)')
+
+    def test_a_reduction_it_cannot_express_fails_the_translation(self):   # U64 (type 2) on a float's path, once dropped with a line in the log
+        with self.assertRaises(AssertionError) as e: self.translate(self.red(2))
+        self.assertIn('Invalid reduction type: U64', str(e.exception))
 
 
 class BarrierMoves(Translated):

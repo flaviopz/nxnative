@@ -470,6 +470,10 @@ static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
             gen = gsym("_ZN2nn5audio6server17AudioRenderSystem15GenerateCommandEPvm");
         }
         mu_off = gen20 ? 0x2d0 : 0x1f0; g_sink_id = gen20 ? 0x14 : 0x13;
+        if (gen20) {   // the mutex UpdateImpl takes, from its own prologue: +0x2d0 in SDK 20, +0x2d8 in SDK 22 (Ocarina of Time). At the wrong offset nothing was excluded, and a memory pool detached under command generation crashed in AddressInfo::GetReference
+            const uint32_t *u = guest_sym("_ZN2nn5audio6server17AudioRenderSystem10UpdateImplEPvmS3_mPKvm");
+            for (int i = 0; u && i < 24; i++) if ((u[i] & 0xffc003e0u) == 0x91000000u && (u[i] >> 10 & 0xfff) >= 0x200) { mu_off = u[i] >> 10 & 0xfff; break; }
+        }
         int os_mutex = 0;
         // SdkMutexType is looked up only when the SDK uses it: SDK 3.5.1 has none (OCTOPATH TRAVELER: LockMutex at +0x1f8)
         if (!gen20 && update_lock(&mu_off, &os_mutex) && os_mutex) { lock = gsym("_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"); unlock = gsym("_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE"); }
@@ -577,6 +581,9 @@ HLE_FORCE("_ZN2nn5audio30GetActiveAudioOutputDeviceNameEPNS0_15AudioDeviceNameE"
 HLE_FORCE("_ZN2nn5audio19ListAudioDeviceNameEPNS0_15AudioDeviceNameEi", "output device list (SDK 12 name): 1 built-in speaker", int, h_ad_List12, char *names, int n) { return h_ad_List(names, n); }
 HLE_FORCE("_ZN2nn5audio24GetActiveAudioDeviceNameEPNS0_15AudioDeviceNameE", "active output device (SDK 12 name): built-in speaker", void, h_ad_Active12, char *name) { out_devname(name); }
 HLE_FORCE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", "output channel count: 2", int, h_ad_Channels, void) { return 2; }
+// Virtual audio devices and streams of SDK 22 (Ocarina of Time): the SDK reaches them through the auddmg:u service, which the host does not serve. The game asks for microphones at boot (main+0xf48124)
+// and leaves them alone when there are none. Its output streams are an alternative to the audio renderer: it aborts when opening one fails, and the log names the call, so the route can be taken over if a game takes it
+HLE_FORCE("_ZN2nn5audio32GetVirtualOutputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "virtual output device properties: left as they are, answers success", Result, h_ad_VirtProps, void *props, const char *name) { (void)props; (void)name; return RES_OK; }
 // Device volume: kept and read back (DRAGON QUEST VII Reimagined reads it at boot, main+0xee8edc), not applied: the host's output has the system's own volume
 static _Atomic float g_dev_vol = 1.0f;
 HLE_FORCE("_ZN2nn5audio26SetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameEf", "device volume; kept for the getter, not applied by the host", void, h_ad_SetVol, const char *name, float v) { (void)name; atomic_store(&g_dev_vol, v); }

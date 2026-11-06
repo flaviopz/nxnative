@@ -160,6 +160,15 @@ def bnsh_shaders(d, base, label):
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
+        # NVN2 mesh shading: a program's task and mesh shaders are in +0x40 and +0x48, past the six stages above (Ocarina of Time's Model bfsha: a second BNSH of 1,683 variations with only a pixel stage above them)
+        for off, st in ((0x40, 'ts'), (0x48, 'ms')):
+            if base + prog + off + 8 > len(d): continue
+            sc = struct.unpack_from('<Q', d, base + prog + off)[0]
+            if not sc or base + sc + 0x20 > len(d): continue
+            pctl, pcode, ncode, nctl = struct.unpack_from('<QQII', d, base + sc + 8)
+            if nctl < 0x48 or not ncode or base + pctl + nctl > len(d) or base + pcode + ncode > len(d): continue
+            ctl, code = d[base + pctl:base + pctl + nctl], d[base + pcode:base + pcode + ncode]
+            if nvn2_ctl(ctl) and nvn2_stage(ctl, code) == st and not check(label, st, ctl, code): out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
     return out
 
 def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by the control section's stage byte (+0x56: 5, 6, 7; a task or mesh shader's SPH reads as vertex or domain), else the SPH at the code area's start (no code header)
@@ -182,6 +191,9 @@ def bahs_shaders(d, label):
         code, ctl = d[region + off:region + off + n], d[c:c + csz]
         st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
+        # A stray match of the scan: words that read as an entry, pairing a compute shader's control section with a graphics shader's code. Compute code has no SPH, and 0x481 / 0x482 (SPH version 4, types 1 and 2) are no instruction here,
+        # so the translator could only refuse it (Ocarina of Time's agl_common: 1 of 4,126 compute shaders, the entry bahs_variations already allows for)
+        if nvn2 and st == 'cs' and code[:2] in (b'\x81\x04', b'\x82\x04'): continue
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
     bahs_variations(d, label, [o[0] for o in out])
     return out
@@ -226,6 +238,34 @@ def ndsr_shaders(d, label):
         out.append((where, st, ctl, code))
         if st == 'vs': prog = where
         elif st == 'ps' and prog: BAHS_VAR[prog] = BAHS_VAR[where] = f'{label}#NDSR#{prog.rsplit("@", 1)[1]}'; prog = None
+    # Records not at the 16-byte stride (Ocarina of Time's agl_ndsr_vr.pck: other records of other sizes between them): a control offset whose fourth word gives that section's code length
+    words = struct.unpack_from(f'<{min(len(d), 0x1000) // 4}I', d)
+    for c, cl, k, n in zip(words, words[1:], words[2:], words[3:]):
+        if not (0x10 <= c and c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])) or cl & 0xf != 6 or (n >> 8) * 16 != struct.unpack_from('<I', d, c + 0x44)[0]: continue
+        ctl = d[c:c + max(cl >> 4, 0x48)]; code = d[k:k + (n >> 8) * 16]
+        st = nvn2_stage(ctl, code); where = f'{label}#NDSR@{c:#x}'
+        if st and not check(label, st, ctl, code) and not any(x[2] == ctl and x[3] == code for x in out): out.append((where, st, ctl, code))
+    return out
+
+def ndve_shaders(d, label):
+    """nn::ndve's file (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs, Ocarina of Time: the compute shaders its AV1 movies go through; without them every movie is black while its sound plays): 'NDVE', an NDSR pack at +0x28, and
+    22 control sections in the rest of the file. A section with +0x30 set (its own length) has its code area right after it. One with +0x30 zero has an NDSR record, not at a fixed stride: u32 control offset, u32 (control
+    length << 4 | type 6), u32 code offset, u32 (code length / 16 << 8 | type 7), offsets from the pack's start"""
+    base, out = d.find(b'NDSR', 0, 0x100), []
+    head = struct.unpack_from(f'<{0x80 // 4}I', d, base) if base >= 0 and base + 0x80 <= len(d) else ()
+    for m in re.finditer(CTL_MAGIC, d):
+        c = m.start()
+        if c + 0x48 > len(d) or not nvn2_ctl(d[c:c + 0x48]): continue
+        own, ncode = struct.unpack_from('<I', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
+        if own: ctl, k = d[c:c + own], c + own
+        else:
+            rec = next((r for r in zip(head, head[1:], head[2:], head[3:]) if base + r[0] == c and r[1] & 0xf == 6 and (r[3] >> 8) * 16 == ncode), None)
+            if not rec: continue
+            ctl, k = d[c:c + (rec[1] >> 4)], base + rec[2]
+        code = d[k:k + ncode]
+        st = nvn2_stage(ctl, code)
+        if st is None or check(label, st, ctl, code): continue
+        out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
@@ -2515,6 +2555,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
+    if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
@@ -2818,7 +2859,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif d[:4] != b'NDVE' and b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
