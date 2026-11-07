@@ -100,6 +100,8 @@ Para desligar, apague as linhas.
 
 ## Botões de Xbox e PlayStation
 
+<img src="docs/images/flaviopz-oot-botoes.jpg" width="640" alt="Tela Controles básicos do Ocarina of Time com os botões de PlayStation e de Xbox">
+
 O jogo mostra os botões do controle que você conectar. Com um controle de **PlayStation** (DualSense ou DualShock 4), aparecem ○ ✕ △ □, L1/R1, L2/R2 e Options/Create. Com um controle de **Xbox**, aparecem B/A/Y/X, LB/RB, LT/RT e Menu/View. Com um Pro Controller, Joy-Con ou só o teclado, ficam os botões originais do jogo.
 
 O que muda:
