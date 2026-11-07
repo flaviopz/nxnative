@@ -19,6 +19,9 @@ Não há nenhum arquivo do jogo aqui. Você precisa do seu próprio dump do jogo
 - **Profundidade:** a profundidade dos shaders de pixel com várias saídas de cor é lida do registrador certo.
 - **Upscaler do jogo:** consegue escrever direto numa imagem RGBA8, como no console.
 
+**Botões do seu controle**
+- O jogo mostra os botões de Xbox ou de PlayStation conforme o controle conectado, inclusive na tela de controles (veja "Botões de Xbox e PlayStation" abaixo).
+
 **No jogo em si (perfil em `dm/games/0400486024DEC000`)**
 - O jogo roda no ritmo certo quando o Mac faz 30 fps (frame step).
 - A memória de modelos foi dobrada, porque ela enchia no Campo de Hyrule e o jogo fechava.
@@ -37,7 +40,7 @@ Você precisa de um Mac com chip Apple e das mesmas ferramentas do nxnative ofic
 xcodebuild -downloadComponent MetalToolchain
 brew install xcodegen zstd glslang
 brew install --cask dotnet-sdk
-python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
+python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'" numpy pillow scipy shapely astc-encoder-py
 ```
 
 **2. Baixe este fork já no ramo do Zelda:**
@@ -94,6 +97,32 @@ DM_NVN_BARRIER=game
 Para desligar, apague as linhas.
 
 `DM_NVN_POOL_PER_FRAME` acima de 5 não é seguro: as texturas podem ser liberadas cedo demais.
+
+## Botões de Xbox e PlayStation
+
+O jogo mostra os botões do controle que você conectar. Com um controle de **PlayStation** (DualSense ou DualShock 4), aparecem ○ ✕ △ □, L1/R1, L2/R2 e Options/Create. Com um controle de **Xbox**, aparecem B/A/Y/X, LB/RB, LT/RT e Menu/View. Com um Pro Controller, Joy-Con ou só o teclado, ficam os botões originais do jogo.
+
+O que muda:
+- os ícones nas falas e nos menus;
+- as letras dos botões no HUD e os botões da ocarina;
+- a tela **Controles básicos**, que passa a mostrar o desenho de um controle Xbox Series ou de um DualSense, com as linhas ligadas a cada botão, no modo portátil e na TV.
+
+Os ícones seguem a posição do botão, porque o nxnative liga os controles de Xbox e PlayStation pela posição. O botão da direita é o "A" do jogo, então aparece como B no Xbox e como ○ no PlayStation.
+
+Como funciona:
+- A montagem do app (passo 3) cria as duas versões a partir do seu próprio jogo e coloca dentro do app. Para isso, o Python precisa dos pacotes `numpy pillow scipy shapely astc-encoder-py` do passo 1. Sem eles, a montagem avisa e o app sai só com os botões originais.
+- Ao abrir o jogo, o app vê o fabricante do controle conectado (Sony, Microsoft ou Nintendo) e carrega a versão certa.
+- Se você trocar de controle no meio da partida, os botões só mudam quando fechar e abrir o jogo de novo.
+
+Para escolher manualmente, coloque uma destas linhas no `env.txt`:
+
+```
+DM_BOTOES=xbox
+DM_BOTOES=ps
+DM_BOTOES=nintendo
+```
+
+Os desenhos dos controles estão em `dm/games/0400486024DEC000/button_mods` (`xbox.png` e `ps5.png`), e o gerador fica na mesma pasta. Nenhum arquivo do jogo vai para o fork. Esse recurso ainda está em teste.
 
 ## Problemas conhecidos
 
