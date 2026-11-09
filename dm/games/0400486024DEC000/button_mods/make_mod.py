@@ -222,7 +222,7 @@ def build_bntx():
 
 def zs_plain(b):
     try: from compression import zstd
-except ImportError: from backports import zstd   # Python < 3.14
+    except ImportError: from backports import zstd   # Python < 3.14
     return zstd.compress(b, level=6)
 
 if __name__ == '__main__':
